@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -29,6 +30,8 @@ var (
 	tagState     = "waiting_for_tag" // waiting for the user to tag a sticker
 	// error
 	err error
+	// authorized users
+	authorizedUsersList []int64
 )
 
 // init function runs automatically before the main function
@@ -43,6 +46,17 @@ func init() {
 
 func main() {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+
+	// parse authorized users
+	authorizedUsersStrings := strings.Split(os.Getenv("AUTHORIZED_USERS"), ",")
+	for _, userIDStr := range authorizedUsersStrings {
+		userID, err := strconv.ParseInt(userIDStr, 10, 64)
+		if err != nil {
+			log.Printf("Error parsing user ID %s: %v", userIDStr, err)
+			continue
+		}
+		authorizedUsersList = append(authorizedUsersList, userID)
+	}
 
 	// create the bot
 	bot, err = tgbotapi.NewBotAPI(token)
@@ -95,6 +109,16 @@ func main() {
 
 }
 
+// Whether a user is authorized to use the bot
+func isAuthorized(userID int64) bool {
+	for _, authorizedUserID := range authorizedUsersList {
+		if authorizedUserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 // Start the infinite loop to receive updates
 func receiveUpdates(ctx context.Context, updates tgbotapi.UpdatesChannel) {
 	for {
@@ -111,8 +135,29 @@ func receiveUpdates(ctx context.Context, updates tgbotapi.UpdatesChannel) {
 
 // Handle each update
 func handleUpdate(update tgbotapi.Update) {
-	switch {
+	var userID int64
 
+	// Check the user authorization
+	switch {
+	case update.InlineQuery != nil:
+		userID = update.InlineQuery.From.ID
+	case update.Message != nil:
+		userID = update.Message.From.ID
+	default:
+		return // Ignore other types of updates
+	}
+
+	if !isAuthorized(userID) {
+		// Optionally, send a message to unauthorized users
+		if update.Message != nil {
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "You are not authorized to use this bot.")
+			bot.Send(msg)
+		}
+		return
+	}
+
+	// Handle the update
+	switch {
 	// Handle inline query
 	case update.InlineQuery != nil:
 		searchStickers(update.InlineQuery)
@@ -214,8 +259,12 @@ func addTagToSticker(message *tgbotapi.Message) {
 
 // Search for stickers with a tag
 func searchStickers(query *tgbotapi.InlineQuery) {
-	tag := query.Query
+	// check the user authorization
+	if !isAuthorized(query.From.ID) {
+		return
+	}
 
+	tag := query.Query
 	results := make([]interface{}, 0)
 
 	err := db.View(func(txn *badger.Txn) error {
@@ -268,6 +317,12 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 // Debug server to view database contents
 func startDebugServer(db *badger.DB) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != os.Getenv("DB_USER") || pass != os.Getenv("DB_PASS") {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		err := db.View(func(txn *badger.Txn) error {
 			opts := badger.DefaultIteratorOptions
 			it := txn.NewIterator(opts)
