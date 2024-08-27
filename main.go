@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	utils "fbaobot/utils"
 	"fmt"
-	"log"
-	"net/http"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +32,9 @@ var (
 	err error
 	// authorized users
 	authorizedUsersList []int64
+	// Logger
+	Logger  *utils.BotLogger
+	logFile *os.File
 )
 
 // init function runs automatically before the main function
@@ -39,12 +42,26 @@ func init() {
 	// load .env file
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		Logger.Fatal("Error loading .env file")
 	}
 
 }
 
+// Initialize the Logger.er
+func initLogger() {
+	logFile, err := os.OpenFile(os.Getenv("BOT_LOG_PATH"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	Logger = utils.NewBotLogger(multiWriter)
+}
+
 func main() {
+	initLogger()
+	defer logFile.Close()
+
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 
 	// parse authorized users
@@ -52,7 +69,7 @@ func main() {
 	for _, userIDStr := range authorizedUsersStrings {
 		userID, err := strconv.ParseInt(userIDStr, 10, 64)
 		if err != nil {
-			log.Printf("Error parsing user ID %s: %v", userIDStr, err)
+			Logger.Printf("Error parsing user ID %s: %v", userIDStr, err)
 			continue
 		}
 		authorizedUsersList = append(authorizedUsersList, userID)
@@ -62,24 +79,11 @@ func main() {
 	bot, err = tgbotapi.NewBotAPI(token)
 	bot.Debug = true
 	if err != nil {
-		log.Fatal(err)
+		Logger.Fatal(err)
 	}
-
-	// open badger db
-	opts := badger.DefaultOptions("./badger")
-	db, err = badger.Open(opts)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// start the db debug server
-	go startDebugServer(db)
-	defer db.Close()
-
-	// initialize state maps
-	userStates = make(map[int64]string)
-	userCurrentSticker = make(map[int64]string)
 
 	// initialize the bot
+	tgbotapi.SetLogger(Logger)
 	u := tgbotapi.NewUpdate(0)
 	// The maximum time for a connection to be open
 	// The timer is reset every time the bot receives an update
@@ -91,6 +95,21 @@ func main() {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 
+	// open badger db
+	opts := badger.DefaultOptions("./badger")
+
+	db, err = badger.Open(opts)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	// start the db debug server
+	go utils.StartDebugServer(db, Logger)
+	defer db.Close()
+
+	// initialize state maps
+	userStates = make(map[int64]string)
+	userCurrentSticker = make(map[int64]string)
+
 	// `updates` is a golang channel which receives telegram updates
 	// automatically handles offset management (with persistency) by keeping track of the last update ID
 	updates := bot.GetUpdatesChan(u)
@@ -100,7 +119,7 @@ func main() {
 	go receiveUpdates(ctx, updates)
 
 	// Tell the user the bot is online
-	log.Println("Start listening for updates. Press enter to stop")
+	Logger.Println("Start listening for updates. Press enter to stop")
 
 	// Wait for a newline symbol, then cancel handling updates
 	// This is only for the bot admin to stop the bot
@@ -243,7 +262,7 @@ func addTagToSticker(message *tgbotapi.Message) {
 	})
 
 	if err != nil {
-		log.Println("Error adding tag:", err)
+		Logger.Println("Error adding tag:", err)
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry but it failed to add the tag. Please try again.")
 		bot.Send(msg)
 	} else {
@@ -294,7 +313,7 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 	})
 
 	if err != nil {
-		log.Println("Error searching stickers:", err)
+		Logger.Println("Error searching stickers:", err)
 		return
 	}
 
@@ -309,45 +328,7 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 	}
 
 	if _, err := bot.Request(inlineConf); err != nil {
-		log.Println("Error answering inline query:", err)
+		Logger.Println("Error answering inline query:", err)
 	}
 
-}
-
-// Debug server to view database contents
-func startDebugServer(db *badger.DB) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != os.Getenv("DB_USER") || pass != os.Getenv("DB_PASS") {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		err := db.View(func(txn *badger.Txn) error {
-			opts := badger.DefaultIteratorOptions
-			it := txn.NewIterator(opts)
-			defer it.Close()
-
-			fmt.Fprintf(w, "<h1>Database Contents</h1>")
-			for it.Rewind(); it.Valid(); it.Next() {
-				item := it.Item()
-				k := item.Key()
-				err := item.Value(func(v []byte) error {
-					fmt.Fprintf(w, "<p>Key: %s, Value: %s</p>", k, v)
-					return nil
-				})
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
-
-	log.Println("Debug server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
 }
