@@ -5,7 +5,6 @@ import (
 	"context"
 	utils "fbaobot/utils"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -57,8 +56,7 @@ func initLogger() {
 		Logger.Fatal(err)
 	}
 
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	Logger = utils.NewBotLogger(multiWriter)
+	Logger = utils.NewBotLogger(logFile)
 }
 
 func main() {
@@ -100,13 +98,14 @@ func main() {
 
 	// open badger db
 	opts := badger.DefaultOptions("./badger")
+	opts.Logger = Logger
 
 	db, err = badger.Open(opts)
 	if err != nil {
 		Logger.Fatal(err)
 	}
 	// start the db debug server
-	go utils.StartDebugServer(db, Logger)
+	go utils.StartHTTPServer(db, Logger, os.Getenv("PORT"))
 	defer db.Close()
 
 	// initialize state maps

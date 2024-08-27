@@ -8,9 +8,17 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-// Debug server to view database contents
-func StartDebugServer(db *badger.DB, logger *BotLogger) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+// The server serves two purposes:
+// 1. view the contents of the database
+// 2. render requirements
+func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
+	// health check engpoint, return 200 OK
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
+	http.HandleFunc("/debug", func(w http.ResponseWriter, r *http.Request) {
 		// add basic auth
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != os.Getenv("DB_USER") || pass != os.Getenv("DB_PASS") {
@@ -44,7 +52,7 @@ func StartDebugServer(db *badger.DB, logger *BotLogger) {
 		}
 	})
 
-	logger.Println("Debug server starting on :8080")
-	logger.Fatal(http.ListenAndServe(":8080", nil))
+	logger.Println("Debug server starting on :" + port)
+	logger.Fatal(http.ListenAndServe(":"+port, nil))
 
 }
