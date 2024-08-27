@@ -6,18 +6,21 @@ import (
 	"net/http"
 
 	"github.com/dgraph-io/badger/v4"
+	gin "github.com/gin-gonic/gin"
 )
 
 // Start a HTTP server for render port scanning and database debugging
 func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
+	router := gin.Default()
+
 	// for render port scanning
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Bot is running!"))
+	router.GET("/", func(c *gin.Context) {
+		c.String(http.StatusOK, "Bot is running!")
 	})
+
 	// health check endpoint, return 200 OK
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "OK")
+	router.GET("/health", func(c *gin.Context) {
+		c.String(http.StatusOK, "OK")
 	})
 
 	addr := fmt.Sprintf("0.0.0.0:%s", port)
@@ -26,14 +29,11 @@ func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
 		logger.Fatal(err)
 	}
 	logger.Printf("HTTP server starting on %s", ln.Addr().String())
-	// logger.Printf("HTTP server starting on %s", addr)
+
 	server := &http.Server{
-		Addr: addr,
+		Handler: router,
 	}
 	if err := server.Serve(ln); err != nil {
 		logger.Fatal(err)
 	}
-	// if err := server.ListenAndServe(); err != nil {
-	// 	logger.Fatal(err)
-	// }
 }
