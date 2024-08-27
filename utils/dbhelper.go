@@ -12,12 +12,17 @@ import (
 // 1. view the contents of the database
 // 2. render requirements
 func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
+	// for render port scanning
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Bot is running!"))
+	})
 	// health check engpoint, return 200 OK
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
 	})
 
+	// for database debugging
 	http.HandleFunc("/debug", func(w http.ResponseWriter, r *http.Request) {
 		// add basic auth
 		user, pass, ok := r.BasicAuth()
@@ -52,6 +57,7 @@ func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
 		}
 	})
 
+	fmt.Println("Debug server starting on :" + port)
 	logger.Println("Debug server starting on :" + port)
 	logger.Fatal(http.ListenAndServe(":"+port, nil))
 
