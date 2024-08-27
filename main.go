@@ -37,6 +37,9 @@ var (
 	logFile *os.File
 )
 
+// help message
+const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag"
+
 // init function runs automatically before the main function
 func init() {
 	// load .env file
@@ -183,10 +186,42 @@ func handleUpdate(update tgbotapi.Update) {
 		break
 	// Handle messages
 	case update.Message != nil:
-		tagSticker(update.Message)
+		if strings.HasPrefix(update.Message.Text, "/delete") {
+			deleteTag(update.Message)
+		} else if strings.HasPrefix(update.Message.Text, "/help") {
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, helpMessage)
+			bot.Send(msg)
+		} else {
+			tagSticker(update.Message)
+		}
 		break
-
 	}
+}
+
+// Delete a tag
+func deleteTag(message *tgbotapi.Message) {
+	parts := strings.SplitN(message.Text, " ", 2)
+	if len(parts) != 2 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Delete a tag with /delete <tag>")
+		bot.Send(msg)
+		return
+	}
+
+	tagToDelete := parts[1]
+	err := db.Update(func(txn *badger.Txn) error {
+		return txn.Delete([]byte(tagToDelete))
+	})
+
+	if err != nil {
+		Logger.Errorf("Failed to delete key: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry but it failed to delete the tag. Please try again.")
+		bot.Send(msg)
+	} else {
+		Logger.Infof("Deleted key: %s", tagToDelete)
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Successfully deleted tag: %s", tagToDelete))
+		bot.Send(msg)
+	}
+	return
 }
 
 // State machine to tag stickers
