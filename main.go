@@ -65,6 +65,9 @@ func main() {
 	defer logFile.Close()
 
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		Logger.Fatal("No token provided")
+	}
 
 	// parse authorized users
 	authorizedUsersStrings := strings.Split(os.Getenv("AUTHORIZED_USERS"), ",")
