@@ -44,8 +44,7 @@ func init() {
 	// load .env file
 	err := godotenv.Load()
 	if err != nil {
-		// Logger.Fatal("Error loading .env file")
-		Logger.Println("No .env file found, using environment variables")
+		fmt.Println("Error loading .env file, using environment variables")
 	}
 
 }
@@ -54,7 +53,8 @@ func init() {
 func initLogger() {
 	logFile, err := os.OpenFile(os.Getenv("BOT_LOG_PATH"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		Logger.Fatal(err)
+		fmt.Println("Error opening log file: ", err)
+		os.Exit(1)
 	}
 
 	Logger = utils.NewBotLogger(logFile)
