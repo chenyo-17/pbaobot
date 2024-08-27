@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/dgraph-io/badger/v4"
@@ -20,11 +21,19 @@ func StartHTTPServer(db *badger.DB, logger *BotLogger, port string) {
 	})
 
 	addr := fmt.Sprintf("0.0.0.0:%s", port)
-	logger.Printf("HTTP server starting on %s", addr)
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	logger.Printf("HTTP server starting on %s", ln.Addr().String())
+	// logger.Printf("HTTP server starting on %s", addr)
 	server := &http.Server{
 		Addr: addr,
 	}
-	if err := server.ListenAndServe(); err != nil {
+	if err := server.Serve(ln); err != nil {
 		logger.Fatal(err)
 	}
+	// if err := server.ListenAndServe(); err != nil {
+	// 	logger.Fatal(err)
+	// }
 }
