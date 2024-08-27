@@ -5,5 +5,3 @@ services:
     buildCommand: go build -o main .
     startCommand: ./main
     healthCheckPath: /health
-    envVars:
-      - fromGroup: pbaobot-env
