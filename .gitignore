@@ -2,4 +2,3 @@
 *.log
 badger/
 notes/
-go.sum
