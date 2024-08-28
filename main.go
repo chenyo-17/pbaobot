@@ -12,7 +12,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -42,14 +41,14 @@ const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag
 
 // init function runs automatically before the main function
 // not used in render
-func init() {
-	// load .env file
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Println("Error loading .env file, using environment variables")
-	}
+// func init() {
+// 	// load .env file
+// 	err := godotenv.Load()
+// 	if err != nil {
+// 		fmt.Println("Error loading .env file, using environment variables")
+// 	}
 
-}
+// }
 
 // Initialize the Logger.er
 func initLogger() {
@@ -76,9 +75,6 @@ func main() {
 		}
 		authorizedUsersList = append(authorizedUsersList, userID)
 	}
-
-	// start the http server in the foreground
-	go StartHTTPServer()
 
 	// create the bot
 	bot, err = tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_BOT_TOKEN"))
@@ -140,6 +136,8 @@ func main() {
 	// // This is only for the bot admin to stop the bot
 	// bufio.NewReader(os.Stdin).ReadBytes('\n')
 	// cancel()
+	// start the http server in the foreground
+	StartHTTPServer()
 
 }
 
