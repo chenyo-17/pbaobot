@@ -1,16 +1,18 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	utils "fbaobot/utils"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -40,14 +42,14 @@ const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag
 
 // init function runs automatically before the main function
 // not used in render
-// func init() {
-// 	// load .env file
-// 	err := godotenv.Load()
-// 	if err != nil {
-// 		fmt.Println("Error loading .env file, using environment variables")
-// 	}
+func init() {
+	// load .env file
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Error loading .env file, using environment variables")
+	}
 
-// }
+}
 
 // Initialize the Logger.er
 func initLogger() {
@@ -64,12 +66,6 @@ func main() {
 	initLogger()
 	defer logFile.Close()
 
-	token := os.Getenv("TELEGRAM_BOT_TOKEN")
-	// check whether the environment variable is set
-	if token == "" {
-		Logger.Fatal("No token provided")
-	}
-
 	// parse authorized users
 	authorizedUsersStrings := strings.Split(os.Getenv("AUTHORIZED_USERS"), ",")
 	for _, userIDStr := range authorizedUsersStrings {
@@ -81,8 +77,11 @@ func main() {
 		authorizedUsersList = append(authorizedUsersList, userID)
 	}
 
+	// start the http server in the foreground
+	go StartHTTPServer()
+
 	// create the bot
-	bot, err = tgbotapi.NewBotAPI(token)
+	bot, err = tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	bot.Debug = true
 	if err != nil {
 		Logger.Fatal(err)
@@ -98,8 +97,8 @@ func main() {
 
 	// Create a new cancellable background context
 	// This is the single context we will use to handle all updates
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
+	// ctx := context.Background()
+	// ctx, cancel := context.WithCancel(ctx)
 
 	// open badger db
 	opts := badger.DefaultOptions("./badger")
@@ -109,8 +108,6 @@ func main() {
 	if err != nil {
 		Logger.Fatal(err)
 	}
-	// start the db debug server
-	go utils.StartHTTPServer(db, Logger, os.Getenv("PORT"))
 	defer db.Close()
 
 	// initialize state maps
@@ -119,20 +116,64 @@ func main() {
 
 	// `updates` is a golang channel which receives telegram updates
 	// automatically handles offset management (with persistency) by keeping track of the last update ID
-	updates := bot.GetUpdatesChan(u)
+	// updates := bot.GetUpdatesChan(u)
+	var webhook tgbotapi.WebhookConfig
+	webhook, err = tgbotapi.NewWebhook(
+		os.Getenv("WEBHOOK_URL" + bot.Token))
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	_, err = bot.Request(webhook)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	// updates := bot.ListenForWebhook("/" + bot.Token)
 
-	// Pass cancellable context to goroutine to handle updates
+	// // Pass cancellable context to goroutine to handle updates
+	// // go receiveUpdates(ctx, updates)
 	// go receiveUpdates(ctx, updates)
-	go receiveUpdates(ctx, updates)
 
 	// Tell the user the bot is online
 	Logger.Println("Start listening for updates. Press enter to stop")
 
-	// Wait for a newline symbol, then cancel handling updates
-	// This is only for the bot admin to stop the bot
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
-	cancel()
+	// // Wait for a newline symbol, then cancel handling updates
+	// // This is only for the bot admin to stop the bot
+	// bufio.NewReader(os.Stdin).ReadBytes('\n')
+	// cancel()
 
+}
+
+// Start a HTTP server for render port scanning and database debugging
+func StartHTTPServer() {
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Bot server is running!",
+		})
+	})
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Bot server is healthy!",
+		})
+	})
+
+	// listen for webhooks
+	router.POST("/"+bot.Token, func(c *gin.Context) {
+		update := &tgbotapi.Update{}
+		if err := c.BindJSON(&update); err != nil {
+			Logger.Printf("Error binding update: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Error binding update"})
+			return
+		}
+		handleUpdate(*update)
+		c.Status(http.StatusOK)
+	})
+
+	Logger.Println("Starting server on port " + os.Getenv("PORT"))
+
+	if err := router.Run("0.0.0.0:" + os.Getenv("PORT")); err != nil {
+		log.Panicf("error: %s", err)
+	}
 }
 
 // Whether a user is authorized to use the bot
@@ -145,19 +186,19 @@ func isAuthorized(userID int64) bool {
 	return false
 }
 
-// Start the infinite loop to receive updates
-func receiveUpdates(ctx context.Context, updates tgbotapi.UpdatesChannel) {
-	for {
-		select {
-		// stop looping if ctx is cancelled
-		case <-ctx.Done():
-			return
-		// receive update from channel and then handle it
-		case update := <-updates:
-			handleUpdate(update)
-		}
-	}
-}
+// // Start the infinite loop to receive updates
+// func receiveUpdates(ctx context.Context, updates tgbotapi.UpdatesChannel) {
+// 	for {
+// 		select {
+// 		// stop looping if ctx is cancelled
+// 		case <-ctx.Done():
+// 			return
+// 		// receive update from channel and then handle it
+// 		case update := <-updates:
+// 			handleUpdate(update)
+// 		}
+// 	}
+// }
 
 // Handle each update
 func handleUpdate(update tgbotapi.Update) {
