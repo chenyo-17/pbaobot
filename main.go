@@ -10,16 +10,23 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dgraph-io/badger/v4"
+	"context"
+
+	firebase "firebase.google.com/go/v4"
+	"firebase.google.com/go/v4/db"
 	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
+	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 )
 
 var (
-	// the badger db to store sticker tags
-	db *badger.DB
+	// // the badger db to store sticker tags
+	// db *badger.DB
+	firebaseApp *firebase.App
+	firebaseDB  *db.Client
 	// the bot
 	bot *tgbotapi.BotAPI
 	// maps user IDs to their current state: `initialState` or `tagState`
@@ -36,6 +43,8 @@ var (
 	// Logger
 	Logger  *utils.BotLogger
 	logFile *os.File
+	// whether to use webhook
+	useWebhook bool
 )
 
 // help message
@@ -55,7 +64,21 @@ func main() {
 	initLogger()
 	defer logFile.Close()
 
-	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	// initialize firebase db
+	ctx := context.Background()
+	opt := option.WithCredentialsFile(os.Getenv("FIREBASE_CREDENTIALS"))
+	config := &firebase.Config{
+		DatabaseURL: os.Getenv("FIREBASE_DB_URL"),
+	}
+	firebaseApp, err = firebase.NewApp(ctx, config, opt)
+	if err != nil {
+		Logger.Fatalf("Error initializing firebase app: %v", err)
+	}
+
+	firebaseDB, err = firebaseApp.Database(ctx)
+	if err != nil {
+		Logger.Fatalf("Error initializing firebase database: %v", err)
+	}
 
 	// parse authorized users
 	authorizedUsersStrings := strings.Split(os.Getenv("AUTHORIZED_USERS"), ",")
@@ -69,6 +92,7 @@ func main() {
 	}
 
 	// create the bot
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	bot, err = tgbotapi.NewBotAPI(token)
 	bot.Debug = true
 	if err != nil {
@@ -83,39 +107,16 @@ func main() {
 	u.Timeout = 60
 	u.AllowedUpdates = []string{"message", "inline_query"}
 
-	// open badger db
-	opts := badger.DefaultOptions("./badger")
-
-	db, err = badger.Open(opts)
-	if err != nil {
-		Logger.Fatal(err)
-	}
-	// start the db debug server
-	go utils.StartDebugServer(db, Logger)
-	defer db.Close()
-
 	// initialize state maps
 	userStates = make(map[int64]string)
 	userCurrentSticker = make(map[int64]string)
 
-	// configure the webhook
-	// the handle of updates from the webhook is done by the gin server
-	var webhook tgbotapi.WebhookConfig
-	webhook, err = tgbotapi.NewWebhook(
-		os.Getenv("WEBHOOK_URL") + bot.Token)
-	if err != nil {
-		Logger.Fatal(err)
-	}
-	_, err = bot.Request(webhook)
-	if err != nil {
-		Logger.Fatal(err)
-	}
-	info, err := bot.GetWebhookInfo()
-	if err != nil {
-		Logger.Fatal(err)
-	}
-	if info.LastErrorDate != 0 {
-		Logger.Printf("Webhook last error: %s", info.LastErrorMessage)
+	// switch between long polling and webhook
+	useWebhook = os.Getenv("USE_WEBHOOK") == "true"
+	if useWebhook {
+		startWebhook()
+	} else {
+		startPolling()
 	}
 
 	// keep the main process running
@@ -150,16 +151,18 @@ func StartHTTPServer() {
 	})
 
 	// listen for webhooks
-	router.POST("/"+bot.Token, func(c *gin.Context) {
-		update := &tgbotapi.Update{}
-		if err := c.BindJSON(&update); err != nil {
-			Logger.Printf("Error binding update: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Error binding update"})
-			return
-		}
-		handleUpdate(*update)
-		c.Status(http.StatusOK)
-	})
+	if useWebhook {
+		router.POST("/"+bot.Token, func(c *gin.Context) {
+			update := &tgbotapi.Update{}
+			if err := c.BindJSON(&update); err != nil {
+				Logger.Printf("Error binding update: %v", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Error binding update"})
+				return
+			}
+			handleUpdate(*update)
+			c.Status(http.StatusOK)
+		})
+	}
 
 	if err := router.Run("0.0.0.0:" + os.Getenv("PORT")); err != nil {
 		log.Panicf("error: %s", err)
@@ -229,9 +232,9 @@ func deleteTag(message *tgbotapi.Message) {
 	}
 
 	tagToDelete := parts[1]
-	err := db.Update(func(txn *badger.Txn) error {
-		return txn.Delete([]byte(tagToDelete))
-	})
+	ctx := context.Background()
+	ref := firebaseDB.NewRef("tags/" + tagToDelete)
+	err = ref.Delete(ctx)
 
 	if err != nil {
 		Logger.Errorf("Failed to delete key: %v", err)
@@ -296,41 +299,31 @@ func addTagToSticker(message *tgbotapi.Message) {
 	tag := message.Text
 	tag = norm.NFC.String(tag) // normalize unicode characters
 
-	err := db.Update(func(txn *badger.Txn) error {
-		key := []byte(tag)
-		var stickers []string
-		item, err := txn.Get(key)
-		if err == nil {
-			err = item.Value(func(val []byte) error {
-				stickers = strings.Split(string(val), ",")
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-		} else if err != badger.ErrKeyNotFound {
-			return err
-		}
-		// Check if the sticker file ID is already stored
-		fileID := userCurrentSticker[userID]
-		for _, s := range stickers {
-			if s == fileID {
-				return nil // Sticker already exists, skip adding
-			}
-		}
-		stickers = append(stickers, fileID)
-		// store the sticker with the tag
-		// key: tag, value: [sticker1, sticker2, ...]
-		return txn.Set(key, []byte(strings.Join(stickers, ",")))
-	})
+	ctx := context.Background()
+	ref := firebaseDB.NewRef("tags/" + tag)
 
-	if err != nil {
+	var stickers []string
+	if err := ref.Get(ctx, &stickers); err != nil {
+		Logger.Println("Error getting stickers:", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, but it failed to add the tag. Please try again.")
+		bot.Send(msg)
+		return
+	}
+
+	fileID := userCurrentSticker[userID]
+	for _, s := range stickers {
+		if s == fileID {
+			return // Sticker already exists, skip adding
+		}
+	}
+	stickers = append(stickers, fileID)
+
+	if err := ref.Set(ctx, stickers); err != nil {
 		Logger.Println("Error adding tag:", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry but it failed to add the tag. Please try again.")
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, but it failed to add the tag. Please try again.")
 		bot.Send(msg)
 	} else {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "tag "+tag+" added.")
-		// listDB(db)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Tag "+tag+" added.")
 		bot.Send(msg)
 	}
 
@@ -349,35 +342,21 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 	tag := query.Query
 	results := make([]interface{}, 0)
 
-	err := db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		it := txn.NewIterator(opts)
-		defer it.Close()
+	ctx := context.Background()
+	ref := firebaseDB.NewRef("tags/" + tag)
 
-		item, err := txn.Get([]byte(tag))
-		if err == nil {
-			err = item.Value(func(val []byte) error {
-				stickerIDs := strings.Split(string(val), ",")
-				id := 1 // determines the order in the results when there are multiple
-				for _, fileID := range stickerIDs {
-					result := tgbotapi.NewInlineQueryResultCachedSticker(fmt.Sprintf("%d", id), fileID, "")
-					results = append(results, result)
-					id += 1
-				}
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-		} else if err != badger.ErrKeyNotFound {
-			return err
+	var stickerIDs []string
+	if err := ref.Get(ctx, &stickerIDs); err != nil {
+		if err != iterator.Done {
+			Logger.Println("Error searching stickers:", err)
 		}
-		return nil
-	})
-
-	if err != nil {
-		Logger.Println("Error searching stickers:", err)
+		// If tag not found or any other error, return empty results
 		return
+	}
+
+	for id, fileID := range stickerIDs {
+		result := tgbotapi.NewInlineQueryResultCachedSticker(fmt.Sprintf("%d", id+1), fileID, "")
+		results = append(results, result)
 	}
 
 	if len(results) == 0 {
@@ -392,5 +371,51 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 
 	if _, err := bot.Request(inlineConf); err != nil {
 		Logger.Println("Error answering inline query:", err)
+	}
+}
+
+// Use webhook to receive updates
+// This is used for production
+func startWebhook() {
+	// Configure the webhook
+	webhook, err := tgbotapi.NewWebhook(os.Getenv("WEBHOOK_URL") + bot.Token)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+
+	_, err = bot.Request(webhook)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+
+	info, err := bot.GetWebhookInfo()
+	if err != nil {
+		Logger.Fatal(err)
+	}
+
+	if info.LastErrorDate != 0 {
+		Logger.Printf("Webhook last error: %s", info.LastErrorMessage)
+	}
+
+	// Start HTTP server
+	StartHTTPServer()
+}
+
+// Use polling to receive updates
+// This is used for local development
+func startPolling() {
+	// Remove any existing webhook
+	_, err := bot.Request(tgbotapi.DeleteWebhookConfig{})
+	if err != nil {
+		Logger.Printf("Error removing webhook: %v", err)
+	}
+
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		handleUpdate(update)
 	}
 }
