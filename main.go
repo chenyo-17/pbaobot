@@ -1,16 +1,17 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	utils "fbaobot/utils"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
@@ -41,24 +42,13 @@ var (
 const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag"
 
 // init function runs automatically before the main function
+// not work in render
 func init() {
 	// load .env file
 	err := godotenv.Load()
 	if err != nil {
-		Logger.Fatal("Error loading .env file")
+		fmt.Println("Error loading .env file, using environment variables")
 	}
-
-}
-
-// Initialize the Logger.er
-func initLogger() {
-	logFile, err := os.OpenFile(os.Getenv("BOT_LOG_PATH"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		Logger.Fatal(err)
-	}
-
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	Logger = utils.NewBotLogger(multiWriter)
 }
 
 func main() {
@@ -93,11 +83,6 @@ func main() {
 	u.Timeout = 60
 	u.AllowedUpdates = []string{"message", "inline_query"}
 
-	// Create a new cancellable background context
-	// This is the single context we will use to handle all updates
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-
 	// open badger db
 	opts := badger.DefaultOptions("./badger")
 
@@ -113,22 +98,72 @@ func main() {
 	userStates = make(map[int64]string)
 	userCurrentSticker = make(map[int64]string)
 
-	// `updates` is a golang channel which receives telegram updates
-	// automatically handles offset management (with persistency) by keeping track of the last update ID
-	updates := bot.GetUpdatesChan(u)
+	// configure the webhook
+	// the handle of updates from the webhook is done by the gin server
+	var webhook tgbotapi.WebhookConfig
+	webhook, err = tgbotapi.NewWebhook(
+		os.Getenv("WEBHOOK_URL") + bot.Token)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	_, err = bot.Request(webhook)
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	info, err := bot.GetWebhookInfo()
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	if info.LastErrorDate != 0 {
+		Logger.Printf("Webhook last error: %s", info.LastErrorMessage)
+	}
 
-	// Pass cancellable context to goroutine to handle updates
-	// go receiveUpdates(ctx, updates)
-	go receiveUpdates(ctx, updates)
+	// keep the main process running
+	StartHTTPServer()
+}
 
-	// Tell the user the bot is online
-	Logger.Println("Start listening for updates. Press enter to stop")
+// Initialize the Logger
+func initLogger() {
+	logFile, err := os.OpenFile(os.Getenv("BOT_LOG_PATH"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Error opening log file: ", err)
+		os.Exit(1)
+	}
 
-	// Wait for a newline symbol, then cancel handling updates
-	// This is only for the bot admin to stop the bot
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
-	cancel()
+	multiLogger := io.MultiWriter(os.Stdout, logFile)
+	Logger = utils.NewBotLogger(multiLogger)
+}
 
+// Start a HTTP server for render port scanning
+func StartHTTPServer() {
+	gin.SetMode("release")
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Bot server is running!",
+		})
+	})
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Bot server is healthy!",
+		})
+	})
+
+	// listen for webhooks
+	router.POST("/"+bot.Token, func(c *gin.Context) {
+		update := &tgbotapi.Update{}
+		if err := c.BindJSON(&update); err != nil {
+			Logger.Printf("Error binding update: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Error binding update"})
+			return
+		}
+		handleUpdate(*update)
+		c.Status(http.StatusOK)
+	})
+
+	if err := router.Run("0.0.0.0:" + os.Getenv("PORT")); err != nil {
+		log.Panicf("error: %s", err)
+	}
 }
 
 // Whether a user is authorized to use the bot
@@ -139,20 +174,6 @@ func isAuthorized(userID int64) bool {
 		}
 	}
 	return false
-}
-
-// Start the infinite loop to receive updates
-func receiveUpdates(ctx context.Context, updates tgbotapi.UpdatesChannel) {
-	for {
-		select {
-		// stop looping if ctx is cancelled
-		case <-ctx.Done():
-			return
-		// receive update from channel and then handle it
-		case update := <-updates:
-			handleUpdate(update)
-		}
-	}
 }
 
 // Handle each update
@@ -290,7 +311,14 @@ func addTagToSticker(message *tgbotapi.Message) {
 		} else if err != badger.ErrKeyNotFound {
 			return err
 		}
-		stickers = append(stickers, userCurrentSticker[userID])
+		// Check if the sticker file ID is already stored
+		fileID := userCurrentSticker[userID]
+		for _, s := range stickers {
+			if s == fileID {
+				return nil // Sticker already exists, skip adding
+			}
+		}
+		stickers = append(stickers, fileID)
 		// store the sticker with the tag
 		// key: tag, value: [sticker1, sticker2, ...]
 		return txn.Set(key, []byte(strings.Join(stickers, ",")))
@@ -301,7 +329,7 @@ func addTagToSticker(message *tgbotapi.Message) {
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry but it failed to add the tag. Please try again.")
 		bot.Send(msg)
 	} else {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Added tag "+tag)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "tag "+tag+" added.")
 		// listDB(db)
 		bot.Send(msg)
 	}
@@ -365,5 +393,4 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 	if _, err := bot.Request(inlineConf); err != nil {
 		Logger.Println("Error answering inline query:", err)
 	}
-
 }
