@@ -2,7 +2,7 @@ services:
   - type: web
     name: pbaobot
     runtime: go
-    buildCommand: go build -o main .
-    startCommand: ./main
+    buildCommand: go build -tags netgo -ldflags '-s -w' -o app
+    startCommand: ./app
     envVars:
       - fromGroup: pbaobot-env
