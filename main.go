@@ -3,6 +3,7 @@ package main
 import (
 	utils "fbaobot/utils"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -39,8 +40,8 @@ var (
 // help message
 const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag"
 
-// init function runs automatically before the main function
-// not used in render
+// // init function runs automatically before the main function
+// // not used in render
 // func init() {
 // 	// load .env file
 // 	err := godotenv.Load()
@@ -58,7 +59,8 @@ func initLogger() {
 		os.Exit(1)
 	}
 
-	Logger = utils.NewBotLogger(logFile)
+	multiLogger := io.MultiWriter(os.Stdout, logFile)
+	Logger = utils.NewBotLogger(multiLogger)
 }
 
 func main() {
@@ -115,13 +117,20 @@ func main() {
 	// updates := bot.GetUpdatesChan(u)
 	var webhook tgbotapi.WebhookConfig
 	webhook, err = tgbotapi.NewWebhook(
-		os.Getenv("WEBHOOK_URL" + bot.Token))
+		os.Getenv("WEBHOOK_URL") + bot.Token)
 	if err != nil {
 		Logger.Fatal(err)
 	}
 	_, err = bot.Request(webhook)
 	if err != nil {
 		Logger.Fatal(err)
+	}
+	info, err := bot.GetWebhookInfo()
+	if err != nil {
+		Logger.Fatal(err)
+	}
+	if info.LastErrorDate != 0 {
+		Logger.Printf("Telegram callback failed: %s", info.LastErrorMessage)
 	}
 	// updates := bot.ListenForWebhook("/" + bot.Token)
 
@@ -130,7 +139,7 @@ func main() {
 	// go receiveUpdates(ctx, updates)
 
 	// Tell the user the bot is online
-	Logger.Println("Start listening for updates. Press enter to stop")
+	// Logger.Println("Start listening for updates. Press enter to stop")
 
 	// // Wait for a newline symbol, then cancel handling updates
 	// // This is only for the bot admin to stop the bot
@@ -143,6 +152,7 @@ func main() {
 
 // Start a HTTP server for render port scanning and database debugging
 func StartHTTPServer() {
+	gin.SetMode("release")
 	router := gin.New()
 	router.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
