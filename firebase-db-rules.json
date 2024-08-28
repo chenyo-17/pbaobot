@@ -1,0 +1,12 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "tags": {
+      "$tag": {
+        ".read": true,
+        ".write": "auth != null"
+      }
+    }
+  }
+}

@@ -67,6 +67,11 @@ func (l *BotLogger) Fatal(args ...interface{}) {
 	os.Exit(1)
 }
 
+func (l *BotLogger) Fatalf(format string, args ...interface{}) {
+	l.Errorf(format, args...)
+	os.Exit(1)
+}
+
 // Interfaces for tgbot
 func (l *BotLogger) Println(v ...interface{}) {
 	l.Info(v...)
