@@ -100,13 +100,7 @@ func main() {
 		Logger.Fatal(err)
 	}
 
-	// initialize the bot
 	tgbotapi.SetLogger(Logger)
-	u := tgbotapi.NewUpdate(0)
-	// The maximum time for a connection to be open
-	// The timer is reset every time the bot receives an update
-	u.Timeout = 60
-	u.AllowedUpdates = []string{"message", "inline_query"}
 
 	// initialize state maps
 	userStates = make(map[int64]string)
@@ -180,7 +174,7 @@ func StartHTTPServer() {
 
 // Regularly send a request to the server to keep it alive
 func keepServerAlive() {
-	ticker := time.NewTicker(14 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute)
 	go func() {
 		for {
 			<-ticker.C
@@ -405,6 +399,7 @@ func searchStickers(query *tgbotapi.InlineQuery) {
 func startWebhook() {
 	// Configure the webhook
 	webhook, err := tgbotapi.NewWebhook(os.Getenv("WEBHOOK_URL") + bot.Token)
+	webhook.AllowedUpdates = []string{"message", "inline_query"}
 	if err != nil {
 		Logger.Fatal(err)
 	}
@@ -436,8 +431,11 @@ func startPolling() {
 		Logger.Printf("Error removing webhook: %v", err)
 	}
 
+	// The maximum time for a connection to be open
+	// The timer is reset every time the bot receives an update
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	u.AllowedUpdates = []string{"message", "inline_query"}
 
 	updates := bot.GetUpdatesChan(u)
 
