@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"context"
 
@@ -115,6 +116,7 @@ func main() {
 	useWebhook = os.Getenv("USE_WEBHOOK") == "true"
 	if useWebhook {
 		startWebhook()
+		keepServerAlive()
 	} else {
 		startPolling()
 	}
@@ -144,9 +146,16 @@ func StartHTTPServer() {
 			"message": "Bot server is running!",
 		})
 	})
+	// for render health check
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"message": "Bot server is healthy!",
+		})
+	})
+	// for render keep alive
+	router.GET("/keep-alive", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Bot server is alive!",
 		})
 	})
 
@@ -167,6 +176,23 @@ func StartHTTPServer() {
 	if err := router.Run("0.0.0.0:" + os.Getenv("PORT")); err != nil {
 		log.Panicf("error: %s", err)
 	}
+}
+
+// Regularly send a request to the server to keep it alive
+func keepServerAlive() {
+	ticker := time.NewTicker(14 * time.Minute)
+	go func() {
+		for {
+			<-ticker.C
+			_, err := http.Get(os.Getenv("WEBHOOK_URL") + "/keep-alive")
+			if err != nil {
+				Logger.Printf("Error keeping server alive: %v", err)
+			} else {
+				Logger.Println("Server is alive")
+			}
+		}
+	}()
+
 }
 
 // Whether a user is authorized to use the bot
