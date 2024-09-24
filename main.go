@@ -1,20 +1,23 @@
 package main
 
 import (
-	utils "fbaobot/utils"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	utils "pbaobot/utils"
 	"strconv"
 	"strings"
 
 	"context"
 
+	"pbaobot/mensa"
+
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/db"
 	"github.com/gin-gonic/gin"
+	"github.com/go-rod/rod"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
@@ -63,6 +66,9 @@ func init() {
 func main() {
 	initLogger()
 	defer logFile.Close()
+
+	mensa.Browser = rod.New().MustConnect()
+	defer mensa.Browser.MustClose()
 
 	// initialize firebase db
 	ctx := context.Background()
@@ -209,7 +215,9 @@ func handleUpdate(update tgbotapi.Update) {
 		break
 	// Handle messages
 	case update.Message != nil:
-		if strings.HasPrefix(update.Message.Text, "/delete") {
+		if strings.EqualFold(update.Message.Text, "mensa") {
+			checkMensa(update.Message)
+		} else if strings.HasPrefix(update.Message.Text, "/delete") {
 			deleteTag(update.Message)
 		} else if strings.HasPrefix(update.Message.Text, "/help") {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, helpMessage)
@@ -422,5 +430,47 @@ func startPolling() {
 
 	for update := range updates {
 		handleUpdate(update)
+	}
+}
+
+func checkMensa(message *tgbotapi.Message) {
+	menus, err := mensa.AllEthMenus()
+	if err != nil {
+		Logger.Printf("Error fetching menus: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, I couldn't fetch the menus. Please try again later.")
+		bot.Send(msg)
+		return
+	}
+
+	for _, menu := range menus {
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("*%s - %s*\n", menu.Location, menu.Type))
+		text.WriteString(fmt.Sprintf("Category: %s\n", menu.Category))
+		text.WriteString(fmt.Sprintf("Title: %s\n", menu.Title))
+		text.WriteString(fmt.Sprintf("Description: %s\n", menu.Description))
+		text.WriteString(fmt.Sprintf("Price: %s\n", menu.Price))
+
+		msg := tgbotapi.NewMessage(message.Chat.ID, text.String())
+		msg.ParseMode = "Markdown"
+
+		if menu.ImageURL != "" {
+			photo := tgbotapi.NewPhoto(message.Chat.ID, tgbotapi.FileURL(menu.ImageURL))
+			photo.Caption = text.String()
+			photo.ParseMode = "Markdown"
+			_, err := bot.Send(photo)
+			if err != nil {
+				Logger.Printf("Error sending photo: %v", err)
+				// Fall back to sending text message if photo fails
+				_, err = bot.Send(msg)
+				if err != nil {
+					Logger.Printf("Error sending message: %v", err)
+				}
+			}
+		} else {
+			_, err := bot.Send(msg)
+			if err != nil {
+				Logger.Printf("Error sending message: %v", err)
+			}
+		}
 	}
 }

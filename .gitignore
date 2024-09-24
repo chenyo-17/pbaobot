@@ -4,3 +4,4 @@ badger/
 notes/
 app
 *.credential
+.zed/*
