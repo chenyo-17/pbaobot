@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/go-rod/rod"
 )
 
 // Maps from ETH mensa location to its ID used in
@@ -34,9 +35,10 @@ func scrapeEthMenu(mensa string) string {
 	today := time.Now().Format("2006-01-02")
 	url := EthDailyOfferUrl(mensa, today)
 
-	browserMutex.Lock()
-	defer browserMutex.Unlock()
-	page := Browser.MustPage(url)
+	browser := rod.New().MustConnect()
+	defer browser.MustClose()
+
+	page := browser.MustPage(url)
 
 	// Wait for the page to load completely
 	page.MustWaitLoad()
@@ -89,12 +91,12 @@ func parseEthMenus(html string) ([]MenuItem, error) {
 	return menus, nil
 }
 
-// Get all menus from all ETH mensas
+// Return all eth menus of the given meal type
 func AllEthMenus() ([]MenuItem, error) {
 	var allMenus []MenuItem
 	for mensa := range EthMensaId {
-		menu := scrapeEthMenu(mensa)
-		menus, err := parseEthMenus(menu)
+		menuElement := scrapeEthMenu(mensa)
+		menus, err := parseEthMenus(menuElement)
 		for i := range menus {
 			menus[i].Location = mensa
 		}

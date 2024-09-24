@@ -1,10 +1,6 @@
 package mensa
 
-import (
-	"sync"
-
-	"github.com/go-rod/rod"
-)
+import "time"
 
 // Stores all information about a menu item
 type MenuItem struct {
@@ -17,8 +13,5 @@ type MenuItem struct {
 	Type        string // lunch or dinner
 }
 
-// Make the Browser accessible across multiple goroutines
-var (
-	Browser      *rod.Browser
-	browserMutex sync.Mutex
-)
+// Lunch threshold
+var LUNCH_THRESHOLD = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 14, 0, 0, 0, time.Local)

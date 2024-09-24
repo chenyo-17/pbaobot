@@ -9,15 +9,15 @@ import (
 	utils "pbaobot/utils"
 	"strconv"
 	"strings"
+	"time"
 
 	"context"
 
-	"pbaobot/mensa"
+	mensa "pbaobot/mensa"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/db"
 	"github.com/gin-gonic/gin"
-	"github.com/go-rod/rod"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/text/unicode/norm"
@@ -66,9 +66,6 @@ func init() {
 func main() {
 	initLogger()
 	defer logFile.Close()
-
-	mensa.Browser = rod.New().MustConnect()
-	defer mensa.Browser.MustClose()
 
 	// initialize firebase db
 	ctx := context.Background()
@@ -216,7 +213,7 @@ func handleUpdate(update tgbotapi.Update) {
 	// Handle messages
 	case update.Message != nil:
 		if strings.EqualFold(update.Message.Text, "mensa") {
-			checkMensa(update.Message)
+			sendMensaMenues(update.Message)
 		} else if strings.HasPrefix(update.Message.Text, "/delete") {
 			deleteTag(update.Message)
 		} else if strings.HasPrefix(update.Message.Text, "/help") {
@@ -433,7 +430,8 @@ func startPolling() {
 	}
 }
 
-func checkMensa(message *tgbotapi.Message) {
+// Send all mensa menus, one menu per message with image
+func sendMensaMenues(message *tgbotapi.Message) {
 	menus, err := mensa.AllEthMenus()
 	if err != nil {
 		Logger.Printf("Error fetching menus: %v", err)
@@ -441,6 +439,25 @@ func checkMensa(message *tgbotapi.Message) {
 		bot.Send(msg)
 		return
 	}
+
+	// TODO: cache daily menus
+
+	currentTime := time.Now()
+	var filteredMenus []mensa.MenuItem
+	if currentTime.Before(mensa.LUNCH_THRESHOLD) {
+		for _, menu := range menus {
+			if menu.Type == "Lunch" {
+				filteredMenus = append(filteredMenus, menu)
+			}
+		}
+	} else {
+		for _, menu := range menus {
+			if menu.Type == "Dinner" {
+				filteredMenus = append(filteredMenus, menu)
+			}
+		}
+	}
+	menus = filteredMenus
 
 	for _, menu := range menus {
 		var text strings.Builder
