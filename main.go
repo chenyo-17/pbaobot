@@ -9,7 +9,6 @@ import (
 	utils "pbaobot/utils"
 	"strconv"
 	"strings"
-	"time"
 
 	"context"
 
@@ -26,8 +25,6 @@ import (
 )
 
 var (
-	// // the badger db to store sticker tags
-	// db *badger.DB
 	firebaseApp *firebase.App
 	firebaseDB  *db.Client
 	// the bot
@@ -51,7 +48,11 @@ var (
 )
 
 // help message
-const helpMessage = "Send me a sticker to tag it, or use /delete to remove a tag"
+const helpMessage = `Usage:
+1. Send me '/mensa lunch' or '/mensa dinner' to get today's menus.
+2. Send me a sticker to tag.
+3. Use my inline mode to search for stickers given a tag.
+4. Send me /help to show this message again.`
 
 // init function runs automatically before the main function
 // not work in render
@@ -212,8 +213,10 @@ func handleUpdate(update tgbotapi.Update) {
 		break
 	// Handle messages
 	case update.Message != nil:
-		if strings.EqualFold(update.Message.Text, "mensa") {
-			sendMensaMenues(update.Message)
+		if strings.EqualFold(update.Message.Text, "/mensa lunch") {
+			sendMensaMenues(update.Message, "Lunch")
+		} else if strings.EqualFold(update.Message.Text, "/mensa dinner") {
+			sendMensaMenues(update.Message, "Dinner")
 		} else if strings.HasPrefix(update.Message.Text, "/delete") {
 			deleteTag(update.Message)
 		} else if strings.HasPrefix(update.Message.Text, "/help") {
@@ -263,7 +266,7 @@ func tagSticker(message *tgbotapi.Message) {
 			handleSticker(message)
 			return
 		} else {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "Send me a sticker to tag or a tag to search.")
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Send me a sticker to tag")
 			bot.Send(msg)
 			return
 		}
@@ -423,8 +426,8 @@ func startPolling() {
 	}
 }
 
-// Send all mensa menus, one menu per message with image
-func sendMensaMenues(message *tgbotapi.Message) {
+// Send all mensa menus given the meal type, one menu per message with image
+func sendMensaMenues(message *tgbotapi.Message, mealType string) {
 	menus, err := mensa.AllEthMenus()
 	if err != nil {
 		Logger.Printf("Error fetching menus: %v", err)
@@ -433,22 +436,15 @@ func sendMensaMenues(message *tgbotapi.Message) {
 		return
 	}
 
-	// TODO: cache daily menus
-
-	currentTime := time.Now()
 	var filteredMenus []mensa.MenuItem
-	if currentTime.Before(mensa.LUNCH_THRESHOLD) {
+	if mealType != "" {
 		for _, menu := range menus {
-			if menu.Type == "Lunch" {
+			if menu.Type == mealType {
 				filteredMenus = append(filteredMenus, menu)
 			}
 		}
 	} else {
-		for _, menu := range menus {
-			if menu.Type == "Dinner" {
-				filteredMenus = append(filteredMenus, menu)
-			}
-		}
+		filteredMenus = menus
 	}
 	menus = filteredMenus
 
