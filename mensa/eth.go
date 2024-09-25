@@ -6,23 +6,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/joho/godotenv"
 )
-
-func init() {
-	// load .env
-	envPath := filepath.Join("..", ".env")
-	err := godotenv.Load(envPath)
-	if err != nil {
-		fmt.Println("Error loading .env file, using environment variables")
-	}
-}
 
 // Maps from ETH mensa location to its ID used in
 // https://ethz.ch/en/campus/erleben/gastronomie-und-einkaufen/gastronomie/menueplaene/offerDay.html?id=x
@@ -52,16 +41,17 @@ const EthMenuElement = "div.basecomponent.image-component--full"
 func scrapeEthMensaPage(mensa string) (string, error) {
 	today := time.Now().Format("2006-01-02")
 
-	// Check if the file for today's menu is already cached
-	fileName := fmt.Sprintf("%s_%s.html", today, mensa)
-	if _, err := os.Stat(fileName); err == nil {
-		// File exists, read its content
-		content, err := os.ReadFile(fileName)
-		if err != nil {
-			return "", fmt.Errorf("failed to read existing HTML file: %v", err)
-		}
-		return string(content), nil
-	}
+	// Do not use cache as menu images may not be available before
+	// // Check if the file for today's menu is already cached
+	// fileName := fmt.Sprintf("%s_%s.html", today, mensa)
+	// if _, err := os.Stat(fileName); err == nil {
+	// 	// File exists, read its content
+	// 	content, err := os.ReadFile(fileName)
+	// 	if err != nil {
+	// 		return "", fmt.Errorf("failed to read existing HTML file: %v", err)
+	// 	}
+	// 	return string(content), nil
+	// }
 
 	mensaUrl := EthDailyOfferUrl(mensa, today)
 
@@ -81,7 +71,7 @@ func scrapeEthMensaPage(mensa string) (string, error) {
 
 	// clean up the scraped content
 	htmlContent := cleanScrapeContent(string(body))
-	fileName = fmt.Sprintf("%s_%s.html", today, mensa)
+	fileName := fmt.Sprintf("%s_%s.html", today, mensa)
 	err = os.WriteFile(fileName, []byte(htmlContent), 0644)
 	if err != nil {
 		return "", fmt.Errorf("failed to write HTML file: %v", err)

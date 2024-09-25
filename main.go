@@ -6,40 +6,21 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"pbaobot/mensa"
+	"pbaobot/sticker"
 	utils "pbaobot/utils"
-	"strconv"
 	"strings"
 
-	"context"
-
-	mensa "pbaobot/mensa"
-
-	firebase "firebase.google.com/go/v4"
-	"firebase.google.com/go/v4/db"
 	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
-	"golang.org/x/text/unicode/norm"
-	"google.golang.org/api/iterator"
-	"google.golang.org/api/option"
 )
 
 var (
-	firebaseApp *firebase.App
-	firebaseDB  *db.Client
 	// the bot
 	bot *tgbotapi.BotAPI
-	// maps user IDs to their current state: `initialState` or `tagState`
-	userStates map[int64]string
-	// maps user IDs to the file ID of the sticker they are currently tagging
-	userCurrentSticker map[int64]string
-	// states
-	initialState = ""                // initial state
-	tagState     = "waiting_for_tag" // waiting for the user to tag a sticker
 	// error
 	err error
-	// authorized users
-	authorizedUsersList []int64
 	// Logger
 	Logger  *utils.BotLogger
 	logFile *os.File
@@ -68,33 +49,6 @@ func main() {
 	initLogger()
 	defer logFile.Close()
 
-	// initialize firebase db
-	ctx := context.Background()
-	opt := option.WithCredentialsFile(os.Getenv("FIREBASE_CREDENTIALS"))
-	config := &firebase.Config{
-		DatabaseURL: os.Getenv("FIREBASE_DB_URL"),
-	}
-	firebaseApp, err = firebase.NewApp(ctx, config, opt)
-	if err != nil {
-		Logger.Fatalf("Error initializing firebase app: %v", err)
-	}
-
-	firebaseDB, err = firebaseApp.Database(ctx)
-	if err != nil {
-		Logger.Fatalf("Error initializing firebase database: %v", err)
-	}
-
-	// parse authorized users
-	authorizedUsersStrings := strings.Split(os.Getenv("AUTHORIZED_USERS"), ",")
-	for _, userIDStr := range authorizedUsersStrings {
-		userID, err := strconv.ParseInt(userIDStr, 10, 64)
-		if err != nil {
-			Logger.Printf("Error parsing user ID %s: %v", userIDStr, err)
-			continue
-		}
-		authorizedUsersList = append(authorizedUsersList, userID)
-	}
-
 	// create the bot
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	bot, err = tgbotapi.NewBotAPI(token)
@@ -104,10 +58,6 @@ func main() {
 	}
 
 	tgbotapi.SetLogger(Logger)
-
-	// initialize state maps
-	userStates = make(map[int64]string)
-	userCurrentSticker = make(map[int64]string)
 
 	// switch between long polling and webhook
 	useWebhook = os.Getenv("USE_WEBHOOK") == "true"
@@ -172,16 +122,6 @@ func StartHTTPServer() {
 	}
 }
 
-// Whether a user is authorized to use the bot
-func isAuthorized(userID int64) bool {
-	for _, authorizedUserID := range authorizedUsersList {
-		if authorizedUserID == userID {
-			return true
-		}
-	}
-	return false
-}
-
 // Handle each update
 func handleUpdate(update tgbotapi.Update) {
 	var userID int64
@@ -196,7 +136,7 @@ func handleUpdate(update tgbotapi.Update) {
 		return // Ignore other types of updates
 	}
 
-	if !isAuthorized(userID) {
+	if !utils.IsAuthorizedUser(userID) {
 		// Optionally, send a message to unauthorized users
 		if update.Message != nil {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "You are not authorized to use this bot.")
@@ -209,170 +149,23 @@ func handleUpdate(update tgbotapi.Update) {
 	switch {
 	// Handle inline query
 	case update.InlineQuery != nil:
-		searchStickers(update.InlineQuery)
+		sticker.SearchStickers(bot, update.InlineQuery, Logger)
 		break
 	// Handle messages
 	case update.Message != nil:
 		if strings.EqualFold(update.Message.Text, "/mensa lunch") {
-			sendMensaMenues(update.Message, "Lunch")
+			mensa.SendMensaMenues(bot, update.Message, "Lunch", Logger)
 		} else if strings.EqualFold(update.Message.Text, "/mensa dinner") {
-			sendMensaMenues(update.Message, "Dinner")
+			mensa.SendMensaMenues(bot, update.Message, "Dinner", Logger)
 		} else if strings.HasPrefix(update.Message.Text, "/delete") {
-			deleteTag(update.Message)
+			sticker.DeleteTag(bot, update.Message, Logger)
 		} else if strings.HasPrefix(update.Message.Text, "/help") {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, helpMessage)
 			bot.Send(msg)
 		} else {
-			tagSticker(update.Message)
+			sticker.TagSticker(bot, update.Message, Logger)
 		}
 		break
-	}
-}
-
-// Delete a tag
-func deleteTag(message *tgbotapi.Message) {
-	parts := strings.SplitN(message.Text, " ", 2)
-	if len(parts) != 2 {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Delete a tag with /delete <tag>")
-		bot.Send(msg)
-		return
-	}
-
-	tagToDelete := parts[1]
-	ctx := context.Background()
-	ref := firebaseDB.NewRef("tags/" + tagToDelete)
-	err = ref.Delete(ctx)
-
-	if err != nil {
-		Logger.Errorf("Failed to delete key: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry but it failed to delete the tag. Please try again.")
-		bot.Send(msg)
-	} else {
-		Logger.Infof("Deleted key: %s", tagToDelete)
-		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Successfully deleted tag: %s", tagToDelete))
-		bot.Send(msg)
-	}
-	return
-}
-
-// State machine to tag stickers
-func tagSticker(message *tgbotapi.Message) {
-	userID := message.From.ID
-
-	// initial state (state 0)
-	if userStates[userID] == initialState {
-		if message.Sticker != nil {
-			userStates[userID] = tagState
-			handleSticker(message)
-			return
-		} else {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "Send me a sticker to tag")
-			bot.Send(msg)
-			return
-		}
-	}
-
-	// tagState (state 1)
-	if userStates[userID] == tagState {
-		if strings.HasPrefix(message.Text, "/abort") {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "Current operation aborted.")
-			bot.Send(msg)
-			userStates[userID] = initialState
-			delete(userCurrentSticker, userID)
-			return
-		} else {
-			addTagToSticker(message)
-			userStates[userID] = initialState
-			return
-		}
-	}
-}
-
-// Switch state to receive a tag for a sticker
-func handleSticker(message *tgbotapi.Message) {
-	fileID := message.Sticker.FileID
-	userID := message.From.ID
-	// TODO: support multiple tags for a sticker
-	msg := tgbotapi.NewMessage(message.Chat.ID, "Send me a tag for this sticker or use /abort to cancel.")
-	bot.Send(msg)
-
-	userStates[userID] = tagState
-	userCurrentSticker[userID] = fileID
-}
-
-// Store a tag for a sticker
-func addTagToSticker(message *tgbotapi.Message) {
-	userID := message.From.ID
-	tag := message.Text
-	tag = norm.NFC.String(tag) // normalize unicode characters
-
-	ctx := context.Background()
-	ref := firebaseDB.NewRef("tags/" + tag)
-
-	var stickers []string
-	if err := ref.Get(ctx, &stickers); err != nil {
-		Logger.Println("Error getting stickers:", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, but it failed to add the tag. Please try again.")
-		bot.Send(msg)
-		return
-	}
-
-	fileID := userCurrentSticker[userID]
-	stickers = append(stickers, fileID)
-
-	if err := ref.Set(ctx, stickers); err != nil {
-		Logger.Println("Error adding tag:", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, but it failed to add the tag. Please try again.")
-		bot.Send(msg)
-	} else {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Tag "+tag+" added.")
-		bot.Send(msg)
-	}
-
-	// reset state
-	delete(userStates, userID)
-	delete(userCurrentSticker, userID)
-}
-
-// Search for stickers with a tag
-func searchStickers(query *tgbotapi.InlineQuery) {
-	// check the user authorization
-	if !isAuthorized(query.From.ID) {
-		return
-	}
-
-	tag := query.Query
-	results := make([]interface{}, 0)
-
-	ctx := context.Background()
-	ref := firebaseDB.NewRef("tags/" + tag)
-
-	var stickerIDs []string
-	if err := ref.Get(ctx, &stickerIDs); err != nil {
-		if err != iterator.Done {
-			Logger.Println("Error searching stickers:", err)
-		}
-		// If tag not found or any other error, return empty results
-		return
-	}
-
-	for id, fileID := range stickerIDs {
-		result := tgbotapi.NewInlineQueryResultCachedSticker(fmt.Sprintf("%d", id+1), fileID, "")
-		results = append(results, result)
-	}
-
-	if len(results) == 0 {
-		// no results found
-		return
-	}
-
-	inlineConf := tgbotapi.InlineConfig{
-		InlineQueryID: query.ID,
-		Results:       results,
-	}
-
-	if _, err := bot.Request(inlineConf); err != nil {
-		Logger.Println("Error answering inline query:", err)
 	}
 }
 
@@ -423,60 +216,5 @@ func startPolling() {
 
 	for update := range updates {
 		handleUpdate(update)
-	}
-}
-
-// Send all mensa menus given the meal type, one menu per message with image
-func sendMensaMenues(message *tgbotapi.Message, mealType string) {
-	menus, err := mensa.AllEthMenus()
-	if err != nil {
-		Logger.Printf("Error fetching menus: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, I couldn't fetch the menus. Please try again later.")
-		bot.Send(msg)
-		return
-	}
-
-	var filteredMenus []mensa.MenuItem
-	if mealType != "" {
-		for _, menu := range menus {
-			if menu.Type == mealType {
-				filteredMenus = append(filteredMenus, menu)
-			}
-		}
-	} else {
-		filteredMenus = menus
-	}
-	menus = filteredMenus
-
-	for _, menu := range menus {
-		var text strings.Builder
-		text.WriteString(fmt.Sprintf("*%s - %s*\n", menu.Location, menu.Type))
-		text.WriteString(fmt.Sprintf("Category: %s\n", menu.Category))
-		text.WriteString(fmt.Sprintf("Title: %s\n", menu.Title))
-		text.WriteString(fmt.Sprintf("Description: %s\n", menu.Description))
-		text.WriteString(fmt.Sprintf("Price: %s\n", menu.Price))
-
-		msg := tgbotapi.NewMessage(message.Chat.ID, text.String())
-		msg.ParseMode = "Markdown"
-
-		if menu.ImageURL != "" {
-			photo := tgbotapi.NewPhoto(message.Chat.ID, tgbotapi.FileURL(menu.ImageURL))
-			photo.Caption = text.String()
-			photo.ParseMode = "Markdown"
-			_, err := bot.Send(photo)
-			if err != nil {
-				Logger.Printf("Error sending photo: %v", err)
-				// Fall back to sending text message if photo fails
-				_, err = bot.Send(msg)
-				if err != nil {
-					Logger.Printf("Error sending message: %v", err)
-				}
-			}
-		} else {
-			_, err := bot.Send(msg)
-			if err != nil {
-				Logger.Printf("Error sending message: %v", err)
-			}
-		}
 	}
 }
