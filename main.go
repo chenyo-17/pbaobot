@@ -315,13 +315,6 @@ func addTagToSticker(message *tgbotapi.Message) {
 	}
 
 	fileID := userCurrentSticker[userID]
-	// the fileID changes for the same sticker,
-	// no way to check duplicates
-	// for _, s := range stickers {
-	// 	if s == fileID {
-	// 		return // Sticker already exists, skip adding
-	// 	}
-	// }
 	stickers = append(stickers, fileID)
 
 	if err := ref.Set(ctx, stickers); err != nil {
